@@ -1,0 +1,78 @@
+name: Build WIRDAN Spike (Windows)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter version info
+        run: |
+          flutter --version
+          flutter doctor -v
+
+      # نولّد هيكل Windows على الخادم، فلا نحتاج لحفظه في المستودع.
+      - name: Generate Windows runner
+        shell: pwsh
+        run: |
+          flutter create --platforms=windows --project-name wirdan_spike --org com.wirdan _scaffold
+          if (Test-Path windows) { Remove-Item windows -Recurse -Force }
+          Copy-Item _scaffold\windows windows -Recurse
+          Remove-Item _scaffold -Recurse -Force
+          Copy-Item branding\app_icon.ico windows\runner\resources\app_icon.ico -Force
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Generate database code
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Build Windows release
+        run: flutter build windows --release
+
+      # نضمّن مكتبات VC++ داخل مجلد البرنامج ليعمل على أي جهاز دون تثبيت إضافي.
+      - name: Bundle VC++ runtime and locate release folder
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem build\windows -Recurse -Filter wirdan_spike.exe | Select-Object -First 1
+          if (-not $exe) { throw "wirdan_spike.exe not found" }
+          $dest = $exe.DirectoryName
+          foreach ($f in 'msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll') {
+            Copy-Item "$env:SystemRoot\System32\$f" $dest -Force
+          }
+          "RELEASE_DIR=$dest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Release folder: $dest"
+          Get-ChildItem $dest | Select-Object Name, Length
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found" }
+          & $iscc "/DSourceDir=$env:RELEASE_DIR" installer\wirdan_spike.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist | Select-Object Name, Length
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: WIRDAN-Spike-Setup
+          path: dist/WIRDAN-Spike-Setup.exe
+          # قصيرة عمداً: الحساب المجاني الخاص يحدّ التخزين بـ 500MB
+          retention-days: 3
